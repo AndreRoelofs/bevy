@@ -53,7 +53,12 @@ impl SparseSetIndex for BundleId {
 pub enum InsertMode {
     /// Any existing components of a matching type will be overwritten.
     Replace,
-    /// Any existing components of a matching type will be left unchanged.
+    /// A new component is not inserted if the entity already has:
+    /// - the same component as the one being inserted,
+    /// - a component that is [mutually exclusive] with it, or
+    /// - a component that is mutually exclusive with one of its required components.
+    ///
+    /// [mutually exclusive]: crate::world::World::register_mutually_exclusive_components
     Keep,
 }
 
