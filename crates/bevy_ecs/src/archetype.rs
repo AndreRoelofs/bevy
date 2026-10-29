@@ -261,24 +261,15 @@ impl BundleComponentStatus for SpawnBundleStatus {
 /// [`World`]: crate::world::World
 #[derive(Default)]
 pub struct Edges {
-    insert_bundle_replace: SparseArray<BundleId, ArchetypeAfterBundleInsert>,
+    insert_bundle: SparseArray<BundleId, ArchetypeAfterBundleInsert>,
+    /// Edges for [`InsertMode::Keep`] that skip components, so they differ from the edge in
+    /// `insert_bundle`. This is only used if the edge in `insert_bundle` removes components.
     insert_bundle_keep: SparseArray<BundleId, ArchetypeAfterBundleInsert>,
     remove_bundle: SparseArray<BundleId, Option<ArchetypeId>>,
     take_bundle: SparseArray<BundleId, Option<ArchetypeId>>,
 }
 
 impl Edges {
-    #[inline]
-    fn insert_bundle(
-        &self,
-        insert_mode: InsertMode,
-    ) -> &SparseArray<BundleId, ArchetypeAfterBundleInsert> {
-        match insert_mode {
-            InsertMode::Replace => &self.insert_bundle_replace,
-            InsertMode::Keep => &self.insert_bundle_keep,
-        }
-    }
-
     /// Checks the cache for the target archetype when inserting a bundle into the
     /// source archetype.
     ///
@@ -302,15 +293,25 @@ impl Edges {
         bundle_id: BundleId,
         insert_mode: InsertMode,
     ) -> Option<&ArchetypeAfterBundleInsert> {
-        self.insert_bundle(insert_mode).get(bundle_id)
+        let edge = self.insert_bundle.get(bundle_id);
+        match insert_mode {
+            InsertMode::Replace => edge,
+            InsertMode::Keep => edge
+                .filter(|edge| edge.removed_all().is_empty())
+                .or_else(|| self.insert_bundle_keep.get(bundle_id)),
+        }
     }
 
     /// Caches the target archetype when inserting a bundle into the source archetype.
+    ///
+    /// `keep_only` must be `true` if the edge skips components, so it is only valid for
+    /// [`InsertMode::Keep`]. Otherwise the edge is used for [`InsertMode::Replace`], and also for
+    /// [`InsertMode::Keep`] if it removes no components.
     #[inline]
     pub(crate) fn cache_archetype_after_bundle_insert(
         &mut self,
         bundle_id: BundleId,
-        insert_mode: InsertMode,
+        keep_only: bool,
         archetype_id: ArchetypeId,
         bundle_status: impl Into<Box<[ComponentStatus]>>,
         required_components: impl Into<Box<[RequiredComponentConstructor]>>,
@@ -330,9 +331,10 @@ impl Edges {
                 .chain(removed_sparse)
                 .chain(removed_table),
         );
-        let insert_bundle = match insert_mode {
-            InsertMode::Replace => &mut self.insert_bundle_replace,
-            InsertMode::Keep => &mut self.insert_bundle_keep,
+        let insert_bundle = if keep_only {
+            &mut self.insert_bundle_keep
+        } else {
+            &mut self.insert_bundle
         };
         insert_bundle.insert(
             bundle_id,

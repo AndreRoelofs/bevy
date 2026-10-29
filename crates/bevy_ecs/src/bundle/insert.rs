@@ -718,14 +718,19 @@ impl BundleInfo {
                 })
         };
 
+        // Skipping any component makes the result differ from `InsertMode::Replace`.
+        let mut keep_only = !skipped.is_empty();
         for (index, component_id) in self.iter_required_components().enumerate() {
             // SAFETY: component_id exists
             let component_info = unsafe { components.get_info_unchecked(component_id) };
+            let contained = current_archetype.contains(component_id);
             let skip = insert_mode == InsertMode::Keep
+                && !contained
                 && (current_archetype
                     .insert_removes_mutually_exclusive(components, component_info)
                     || (!skipped.is_empty() && !required_by_inserted(component_id)));
-            if current_archetype.contains(component_id) || skip {
+            keep_only |= skip;
+            if contained || skip {
                 if !component_info.mutually_exclusive().is_empty() {
                     maybe_incompatible.push(component_id);
                 }
@@ -787,7 +792,7 @@ impl BundleInfo {
             // The archetype does not change when we insert this bundle.
             edges.cache_archetype_after_bundle_insert(
                 self.id,
-                insert_mode,
+                keep_only,
                 archetype_id,
                 bundle_status,
                 added_required_components,
@@ -856,7 +861,7 @@ impl BundleInfo {
                 .edges_mut()
                 .cache_archetype_after_bundle_insert(
                     self.id,
-                    insert_mode,
+                    keep_only,
                     new_archetype_id,
                     bundle_status,
                     added_required_components,

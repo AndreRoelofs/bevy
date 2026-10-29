@@ -975,6 +975,66 @@ fn insert_modes_cache_separate_archetype_edges() {
 }
 
 #[test]
+fn insert_modes_share_archetype_edge_without_skipped_components() {
+    use crate::bundle::InsertMode;
+
+    #[derive(Component, Default)]
+    struct CompA;
+
+    #[derive(Component, Default)]
+    struct CompB;
+
+    #[derive(Component, Default)]
+    struct CompC;
+
+    #[derive(Component, Default)]
+    struct CompD;
+
+    let mut world = World::new();
+    world.register_mutually_exclusive_components::<(CompA, CompB)>();
+    let bundle_b = world.register_bundle::<CompB>().id();
+    let bundle_c = world.register_bundle::<CompC>().id();
+    let bundle_d = world.register_bundle::<CompD>().id();
+
+    let e = world.spawn(CompA).id();
+    let archetype_id = world.entity(e).archetype().id();
+    let edge = |world: &World, bundle_id, insert_mode| {
+        world.archetypes()[archetype_id]
+            .edges()
+            .get_archetype_after_bundle_insert(bundle_id, insert_mode)
+    };
+
+    // `CompC` removes no components, so the edge cached by `InsertMode::Replace` is shared.
+    world.entity_mut(e).insert(CompC);
+    assert!(edge(&world, bundle_c, InsertMode::Replace).is_some());
+    assert_eq!(
+        edge(&world, bundle_c, InsertMode::Keep),
+        edge(&world, bundle_c, InsertMode::Replace)
+    );
+
+    // The same holds for an edge cached by `InsertMode::Keep`.
+    let e = world.spawn(CompA).id();
+    world.entity_mut(e).insert_if_new(CompD);
+    assert!(edge(&world, bundle_d, InsertMode::Keep).is_some());
+    assert_eq!(
+        edge(&world, bundle_d, InsertMode::Replace),
+        edge(&world, bundle_d, InsertMode::Keep)
+    );
+
+    // `CompB` removes `CompA`, so `InsertMode::Keep` needs its own edge.
+    let e = world.spawn(CompA).id();
+    world.entity_mut(e).insert(CompB);
+    assert!(edge(&world, bundle_b, InsertMode::Replace).is_some());
+    assert_eq!(edge(&world, bundle_b, InsertMode::Keep), None);
+
+    let e = world.spawn(CompA).id();
+    world.entity_mut(e).insert_if_new(CompB);
+    assert_eq!(edge(&world, bundle_b, InsertMode::Keep), Some(archetype_id));
+    assert!(world.entity(e).contains::<CompA>());
+    assert!(!world.entity(e).contains::<CompB>());
+}
+
+#[test]
 #[should_panic(expected = "has mutually exclusive components")]
 fn insert_if_new_bundle_with_mutually_exclusive_components_panics() {
     #[derive(Component, Default)]
