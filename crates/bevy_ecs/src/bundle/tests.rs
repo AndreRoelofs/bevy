@@ -839,6 +839,86 @@ fn insert_if_new_skipped_component_runs_no_hooks_and_is_dropped() {
 }
 
 #[test]
+fn insert_by_id_keep_skips_mutually_exclusive_component() {
+    use crate::{bundle::InsertMode, system::entity_command};
+    use alloc::sync::Arc;
+
+    #[derive(Component, Default)]
+    struct CompA;
+
+    #[derive(Component)]
+    struct CompB(#[expect(dead_code, reason = "only dropped")] Arc<()>);
+
+    #[derive(Component)]
+    #[component(storage = "SparseSet")]
+    struct CompC(#[expect(dead_code, reason = "only dropped")] Arc<()>);
+
+    let mut world = World::new();
+    world.register_mutually_exclusive_components::<(CompA, CompB)>();
+    world.register_mutually_exclusive_components::<(CompA, CompC)>();
+    let comp_b = world.register_component::<CompB>();
+    let comp_c = world.register_component::<CompC>();
+
+    let value = Arc::new(());
+    let e = world.spawn(CompA).id();
+    // SAFETY: `comp_b` and `comp_c` are the ids of `CompB` and `CompC` in `world`
+    unsafe {
+        entity_command::insert_by_id(comp_b, CompB(value.clone()), InsertMode::Keep)
+            .apply(world.entity_mut(e));
+        entity_command::insert_by_id(comp_c, CompC(value.clone()), InsertMode::Keep)
+            .apply(world.entity_mut(e));
+    }
+    assert!(world.entity(e).contains::<CompA>());
+    assert!(!world.entity(e).contains::<CompB>());
+    assert!(!world.entity(e).contains::<CompC>());
+    assert_eq!(Arc::strong_count(&value), 1);
+
+    // SAFETY: `comp_b` is the id of `CompB` in `world`
+    unsafe {
+        entity_command::insert_by_id(comp_b, CompB(value.clone()), InsertMode::Replace)
+            .apply(world.entity_mut(e));
+    }
+    assert!(!world.entity(e).contains::<CompA>());
+    assert!(world.entity(e).contains::<CompB>());
+}
+
+#[test]
+fn insert_if_new_skipped_component_triggers_no_observers() {
+    #[derive(Component, Default)]
+    struct CompA;
+
+    #[derive(Component, Default)]
+    struct CompB;
+
+    #[derive(Component, Default)]
+    struct CompC;
+
+    #[derive(Resource, Default)]
+    struct Log(Vec<&'static str>);
+
+    let mut world = World::new();
+    world.init_resource::<Log>();
+    world.register_mutually_exclusive_components::<(CompA, CompB)>();
+    world.add_observer(|_: On<Discard<CompA>>, mut log: ResMut<Log>| log.0.push("discard A"));
+    world.add_observer(|_: On<Remove<CompA>>, mut log: ResMut<Log>| log.0.push("remove A"));
+    world.add_observer(|_: On<Add<CompB>>, mut log: ResMut<Log>| log.0.push("add B"));
+    world.add_observer(|_: On<Insert<CompB>>, mut log: ResMut<Log>| log.0.push("insert B"));
+    world.add_observer(|_: On<Add<CompC>>, mut log: ResMut<Log>| log.0.push("add C"));
+    world.add_observer(|_: On<Insert<CompC>>, mut log: ResMut<Log>| log.0.push("insert C"));
+
+    let e = world.spawn(CompA).id();
+    world.entity_mut(e).insert_if_new((CompB, CompC));
+    assert_eq!(world.resource::<Log>().0, vec!["add C", "insert C"]);
+
+    world.resource_mut::<Log>().0.clear();
+    world.entity_mut(e).insert(CompB);
+    assert_eq!(
+        world.resource::<Log>().0,
+        vec!["discard A", "remove A", "add B", "insert B"]
+    );
+}
+
+#[test]
 fn insert_if_new_adds_components_that_are_not_mutually_exclusive() {
     #[derive(Component, Default)]
     struct CompA;
