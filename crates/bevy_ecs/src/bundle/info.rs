@@ -266,40 +266,42 @@ impl BundleInfo {
             };
             // SAFETY: bundle_component is a valid index per unsafe bundle impl
             let status = unsafe { bundle_component_status.get_status(bundle_component) };
-            match (storage_type, status, insert_mode) {
+            bundle_component += 1;
+            let replace = match (status, insert_mode) {
+                (ComponentStatus::Added, _) => false,
+                (ComponentStatus::Existing, InsertMode::Replace) => true,
                 // The value is not written: either the existing value is kept, or the component is
                 // skipped and the target archetype has no storage for it.
-                (_, ComponentStatus::Existing, InsertMode::Keep)
-                | (_, ComponentStatus::Skipped, _) => {
+                (ComponentStatus::Existing, InsertMode::Keep) | (ComponentStatus::Skipped, _) => {
                     // SAFETY: component_id is in self.component_ids, which are valid in `components`
                     let info = unsafe { components.get_info_unchecked(component_id) };
                     if let Some(drop_fn) = info.drop() {
                         // SAFETY: component_ptr valid per unsafe bundle impl
                         unsafe { drop_fn(component_ptr) };
                     }
+                    return;
                 }
-                (StorageType::Table, ComponentStatus::Added, _) => {
+            };
+            match storage_type {
+                StorageType::Table => {
                     let column =
-                        // SAFETY: If component_id is in self.component_ids, BundleInfo::new ensures that
-                        // the target table contains the component.
+                        // SAFETY: The component is added or existing, so it is part of the target
+                        // archetype and the target table contains it.
                         unsafe { table.get_column_mut(component_id).debug_checked_unwrap() };
-                    // SAFETY:
-                    // - table_row valid per preconditions
-                    // - component_ptr valid per unsafe bundle impl
-                    unsafe { column.initialize(table_row, component_ptr, change_tick, caller) };
+                    if replace {
+                        // SAFETY:
+                        // - table_row valid per preconditions
+                        // - component_ptr valid per unsafe bundle impl
+                        // - component exists per bundle_component_status requirements
+                        unsafe { column.replace(table_row, component_ptr, change_tick, caller) };
+                    } else {
+                        // SAFETY:
+                        // - table_row valid per preconditions
+                        // - component_ptr valid per unsafe bundle impl
+                        unsafe { column.initialize(table_row, component_ptr, change_tick, caller) };
+                    }
                 }
-                (StorageType::Table, ComponentStatus::Existing, InsertMode::Replace) => {
-                    let column =
-                        // SAFETY: If component_id is in self.component_ids, BundleInfo::new ensures that
-                        // the target table contains the component.
-                        unsafe { table.get_column_mut(component_id).debug_checked_unwrap() };
-                    // SAFETY:
-                    // - table_row valid per preconditions
-                    // - component_ptr valid per unsafe bundle impl
-                    // - component exists per bundle_component_status requirements
-                    unsafe { column.replace(table_row, component_ptr, change_tick, caller) };
-                }
-                (StorageType::SparseSet, _, _) => {
+                StorageType::SparseSet => {
                     let sparse_set =
                         // SAFETY: If component_id is in self.component_ids, BundleInfo::new ensures that
                         // a sparse set exists for the component.
@@ -308,7 +310,6 @@ impl BundleInfo {
                     unsafe { sparse_set.insert(entity, component_ptr, change_tick, caller) };
                 }
             }
-            bundle_component += 1;
         });
         // Remove this once closure_lifetime_binder is stable
         fn bind_lifetime<F: FnMut(StorageType, OwningPtr<'_>)>(func: F) -> F {
