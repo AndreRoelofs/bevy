@@ -745,7 +745,31 @@ impl Archetype {
         self.components.contains(component_id)
     }
 
-    pub(crate) fn insert_removes_mutually_exclusive(
+    /// Returns the status of `component_id` when inserting it into this archetype with `insert_mode`.
+    ///
+    /// If `insert_mode` is [`InsertMode::Keep`] and `component_id` (or one of its required
+    /// components) is mutually exclusive with an existing component in this archetype, the return
+    /// status becomes [`ComponentStatus::Skipped`].
+    pub(crate) fn insert_status(
+        &self,
+        components: &Components,
+        component_id: ComponentId,
+        insert_mode: InsertMode,
+    ) -> ComponentStatus {
+        if self.contains(component_id) {
+            ComponentStatus::Existing
+        } else if insert_mode == InsertMode::Keep
+            && components
+                .get_info(component_id)
+                .is_some_and(|info| self.insert_removes_mutually_exclusive(components, info))
+        {
+            ComponentStatus::Skipped
+        } else {
+            ComponentStatus::Added
+        }
+    }
+
+    fn insert_removes_mutually_exclusive(
         &self,
         components: &Components,
         info: &ComponentInfo,

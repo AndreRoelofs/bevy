@@ -1,5 +1,5 @@
 use crate::{
-    archetype::Archetype,
+    archetype::{Archetype, ComponentStatus},
     bundle::{Bundle, BundleRemover, InsertMode},
     change_detection::MaybeLocation,
     component::{
@@ -1058,19 +1058,6 @@ impl<'w> EntityClonerBuilder<'w, OptIn> {
     }
 }
 
-/// Returns `true` if [`InsertMode::Keep`] would add `component` to `target_archetype`: it must not exist
-/// there yet, and adding it must not remove a mutually exclusive component.
-fn keep_allows_insert(
-    components: &Components,
-    target_archetype: &Archetype,
-    component: ComponentId,
-) -> bool {
-    !target_archetype.contains(component)
-        && components.get_info(component).is_none_or(|info| {
-            !target_archetype.insert_removes_mutually_exclusive(components, info)
-        })
-}
-
 /// Filters that can selectively clone components depending on its inner configuration are unified with this trait.
 #[doc(hidden)]
 pub trait CloneByFilter: Into<EntityClonerFilter> {
@@ -1176,7 +1163,8 @@ impl CloneByFilter for OptOut {
             InsertMode::Keep => {
                 for component in source_archetype.iter_components() {
                     if !self.deny.contains(&component)
-                        && keep_allows_insert(components, *target_archetype, component)
+                        && target_archetype.insert_status(components, component, InsertMode::Keep)
+                            == ComponentStatus::Added
                     {
                         clone_component(component);
                     }
@@ -1262,7 +1250,8 @@ impl CloneByFilter for OptIn {
 
             let do_clone = source_archetype.contains(component)
                 && (explicit.insert_mode == InsertMode::Replace
-                    || keep_allows_insert(components, *target_archetype, component));
+                    || target_archetype.insert_status(components, component, InsertMode::Keep)
+                        == ComponentStatus::Added);
             if do_clone {
                 clone_component(component);
                 uncloned_components -= 1;

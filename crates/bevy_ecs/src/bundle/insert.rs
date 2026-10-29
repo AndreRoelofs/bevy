@@ -665,41 +665,42 @@ impl BundleInfo {
         for component_id in self.iter_explicit_components() {
             // SAFETY: component_id exists
             let component_info = unsafe { components.get_info_unchecked(component_id) };
-            if current_archetype.contains(component_id) {
-                bundle_status.push(ComponentStatus::Existing);
-                existing.push(component_id);
-                if !component_info.mutually_exclusive().is_empty() {
-                    maybe_incompatible.push(component_id);
+            let status = current_archetype.insert_status(components, component_id, insert_mode);
+            bundle_status.push(status);
+            match status {
+                ComponentStatus::Existing => {
+                    existing.push(component_id);
+                    if !component_info.mutually_exclusive().is_empty() {
+                        maybe_incompatible.push(component_id);
+                    }
                 }
-            } else if insert_mode == InsertMode::Keep
-                && current_archetype.insert_removes_mutually_exclusive(components, component_info)
-            {
-                bundle_status.push(ComponentStatus::Skipped);
-                skipped.push(component_id);
-                if !component_info.mutually_exclusive().is_empty() {
-                    maybe_incompatible.push(component_id);
+                ComponentStatus::Skipped => {
+                    skipped.push(component_id);
+                    if !component_info.mutually_exclusive().is_empty() {
+                        maybe_incompatible.push(component_id);
+                    }
                 }
-            } else {
-                bundle_status.push(ComponentStatus::Added);
-                added.push(component_id);
-                match component_info.storage_type() {
-                    StorageType::Table => new_table_components.push(component_id),
-                    StorageType::SparseSet => new_sparse_set_components.push(component_id),
-                }
-                if !component_info.mutually_exclusive().is_empty() {
-                    maybe_incompatible.push(component_id);
-                    for &incompatible_id in component_info
-                        .mutually_exclusive()
-                        .iter()
-                        .filter(|id| current_archetype.contains(**id))
-                    {
-                        // SAFETY: incompatible_id is in current_archetype, so it must exist
-                        match unsafe { components.get_info_unchecked(incompatible_id) }
-                            .storage_type()
+                ComponentStatus::Added => {
+                    added.push(component_id);
+                    match component_info.storage_type() {
+                        StorageType::Table => new_table_components.push(component_id),
+                        StorageType::SparseSet => new_sparse_set_components.push(component_id),
+                    }
+                    if !component_info.mutually_exclusive().is_empty() {
+                        maybe_incompatible.push(component_id);
+                        for &incompatible_id in component_info
+                            .mutually_exclusive()
+                            .iter()
+                            .filter(|id| current_archetype.contains(**id))
                         {
-                            StorageType::SparseSet => removed_sparse.insert(incompatible_id),
-                            StorageType::Table => removed_table.insert(incompatible_id),
-                        };
+                            // SAFETY: incompatible_id is in current_archetype, so it must exist
+                            match unsafe { components.get_info_unchecked(incompatible_id) }
+                                .storage_type()
+                            {
+                                StorageType::SparseSet => removed_sparse.insert(incompatible_id),
+                                StorageType::Table => removed_table.insert(incompatible_id),
+                            };
+                        }
                     }
                 }
             }
@@ -723,14 +724,13 @@ impl BundleInfo {
         for (index, component_id) in self.iter_required_components().enumerate() {
             // SAFETY: component_id exists
             let component_info = unsafe { components.get_info_unchecked(component_id) };
-            let contained = current_archetype.contains(component_id);
-            let skip = insert_mode == InsertMode::Keep
-                && !contained
-                && (current_archetype
-                    .insert_removes_mutually_exclusive(components, component_info)
-                    || (!skipped.is_empty() && !required_by_inserted(component_id)));
+            let status = current_archetype.insert_status(components, component_id, insert_mode);
+            let skip = status == ComponentStatus::Skipped
+                || (status == ComponentStatus::Added
+                    && !skipped.is_empty()
+                    && !required_by_inserted(component_id));
             keep_only |= skip;
-            if contained || skip {
+            if status == ComponentStatus::Existing || skip {
                 if !component_info.mutually_exclusive().is_empty() {
                     maybe_incompatible.push(component_id);
                 }
