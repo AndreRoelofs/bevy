@@ -10,7 +10,7 @@ use crate::{
     },
     bundle::{ArchetypeMoveType, Bundle, BundleId, BundleInfo, DynamicBundle, InsertMode},
     change_detection::{MaybeLocation, Tick},
-    component::{Components, StorageType},
+    component::{ComponentId, Components, StorageType},
     entity::{Entities, Entity, EntityLocation},
     event::{EntityComponentsTrigger, GlobalTrigger},
     lifecycle::{AddEvent, DiscardEvent, InsertEvent, RemoveEvent, ADD, DISCARD, INSERT, REMOVE},
@@ -29,6 +29,7 @@ pub(crate) struct BundleInserter<'w> {
     archetype_after_insert: ConstNonNull<ArchetypeAfterBundleInsert>,
     archetype: NonNull<Archetype>,
     archetype_move_type: ArchetypeMoveType,
+    insert_mode: InsertMode,
     change_tick: Tick,
 }
 
@@ -39,12 +40,13 @@ impl<'w> BundleInserter<'w> {
     pub(crate) unsafe fn new<T: Bundle>(
         world: &'w mut World,
         archetype_id: ArchetypeId,
+        insert_mode: InsertMode,
         change_tick: Tick,
     ) -> Self {
         let bundle_id = world.register_bundle_info::<T>();
 
         // SAFETY: We just ensured this bundle exists
-        unsafe { Self::new_with_id(world, archetype_id, bundle_id, change_tick) }
+        unsafe { Self::new_with_id(world, archetype_id, bundle_id, insert_mode, change_tick) }
     }
 
     /// Creates a new [`BundleInserter`].
@@ -57,6 +59,7 @@ impl<'w> BundleInserter<'w> {
         world: &'w mut World,
         archetype_id: ArchetypeId,
         bundle_id: BundleId,
+        insert_mode: InsertMode,
         change_tick: Tick,
     ) -> Self {
         // SAFETY: bundle exists per precondition
@@ -69,6 +72,7 @@ impl<'w> BundleInserter<'w> {
                 &world.components,
                 &world.observers,
                 archetype_id,
+                insert_mode,
             )
         };
 
@@ -85,7 +89,7 @@ impl<'w> BundleInserter<'w> {
         let archetype_after_insert = unsafe {
             archetype
                 .edges()
-                .get_archetype_after_bundle_insert_internal(bundle_id)
+                .get_archetype_after_bundle_insert_internal(bundle_id, insert_mode)
                 .debug_checked_unwrap()
                 .into()
         };
@@ -109,6 +113,7 @@ impl<'w> BundleInserter<'w> {
             archetype_after_insert,
             bundle_info: bundle_info.into(),
             archetype_move_type,
+            insert_mode,
             change_tick,
             world: world.as_unsafe_world_cell(),
         };
@@ -450,10 +455,10 @@ impl<'w> BundleInserter<'w> {
         entity: Entity,
         location: EntityLocation,
         bundle: MovingPtr<'_, T>,
-        insert_mode: InsertMode,
         caller: MaybeLocation,
         relationship_hook_mode: RelationshipHookMode,
     ) -> EntityLocation {
+        let insert_mode = self.insert_mode;
         // SAFETY: Points to valid data; the reference doesn't escape this function.
         // This points to data in the world, but
         // - We have exclusive ownership of the world
@@ -485,6 +490,7 @@ impl<'w> BundleInserter<'w> {
             // - table_row & bundle match
             unsafe {
                 self.bundle_info.as_ref().write_components(
+                    self.world.components(),
                     table,
                     sparse_sets,
                     archetype_after_insert,
@@ -624,6 +630,9 @@ impl BundleInfo {
     ///
     /// Results are cached in the [`Archetype`] graph to avoid redundant work.
     ///
+    /// With [`InsertMode::Keep`], components that could only be added by removing a mutually exclusive
+    /// component are skipped, so the resulting archetype can differ from [`InsertMode::Replace`].
+    ///
     /// # Safety
     /// `components` must be the same components as passed in [`Self::new`]
     pub(crate) unsafe fn insert_bundle_into_archetype(
@@ -633,10 +642,11 @@ impl BundleInfo {
         components: &Components,
         observers: &Observers,
         archetype_id: ArchetypeId,
+        insert_mode: InsertMode,
     ) -> (ArchetypeId, bool) {
         if let Some(archetype_after_insert_id) = archetypes[archetype_id]
             .edges()
-            .get_archetype_after_bundle_insert(self.id)
+            .get_archetype_after_bundle_insert(self.id, insert_mode)
         {
             return (archetype_after_insert_id, false);
         }
@@ -649,6 +659,7 @@ impl BundleInfo {
         let mut removed_table = HashSet::new();
         let mut removed_sparse = HashSet::new();
         let mut maybe_incompatible = Vec::new();
+        let mut skipped = Vec::new();
 
         let current_archetype = &mut archetypes[archetype_id];
         for component_id in self.iter_explicit_components() {
@@ -657,6 +668,14 @@ impl BundleInfo {
             if current_archetype.contains(component_id) {
                 bundle_status.push(ComponentStatus::Existing);
                 existing.push(component_id);
+                if !component_info.mutually_exclusive().is_empty() {
+                    maybe_incompatible.push(component_id);
+                }
+            } else if insert_mode == InsertMode::Keep
+                && current_archetype.insert_removes_mutually_exclusive(components, component_info)
+            {
+                bundle_status.push(ComponentStatus::Skipped);
+                skipped.push(component_id);
                 if !component_info.mutually_exclusive().is_empty() {
                     maybe_incompatible.push(component_id);
                 }
@@ -686,10 +705,27 @@ impl BundleInfo {
             }
         }
 
+        // A required component is only added if a component that isn't skipped requires it.
+        let required_by_inserted = |required_id: ComponentId| {
+            self.iter_explicit_components()
+                .filter(|id| !skipped.contains(id))
+                .any(|id| {
+                    // SAFETY: id exists
+                    unsafe { components.get_info_unchecked(id) }
+                        .required_components()
+                        .all
+                        .contains_key(&required_id)
+                })
+        };
+
         for (index, component_id) in self.iter_required_components().enumerate() {
             // SAFETY: component_id exists
             let component_info = unsafe { components.get_info_unchecked(component_id) };
-            if current_archetype.contains(component_id) {
+            let skip = insert_mode == InsertMode::Keep
+                && (current_archetype
+                    .insert_removes_mutually_exclusive(components, component_info)
+                    || (!skipped.is_empty() && !required_by_inserted(component_id)));
+            if current_archetype.contains(component_id) || skip {
                 if !component_info.mutually_exclusive().is_empty() {
                     maybe_incompatible.push(component_id);
                 }
@@ -740,11 +776,18 @@ impl BundleInfo {
             }
         }
 
+        debug_assert!(
+            insert_mode == InsertMode::Replace
+                || (removed_sparse.is_empty() && removed_table.is_empty()),
+            "Inserting with `InsertMode::Keep` must not remove components"
+        );
+
         if new_table_components.is_empty() && new_sparse_set_components.is_empty() {
             let edges = current_archetype.edges_mut();
             // The archetype does not change when we insert this bundle.
             edges.cache_archetype_after_bundle_insert(
                 self.id,
+                insert_mode,
                 archetype_id,
                 bundle_status,
                 added_required_components,
@@ -813,6 +856,7 @@ impl BundleInfo {
                 .edges_mut()
                 .cache_archetype_after_bundle_insert(
                     self.id,
+                    insert_mode,
                     new_archetype_id,
                     bundle_status,
                     added_required_components,

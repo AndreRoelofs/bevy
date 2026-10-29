@@ -220,7 +220,10 @@ impl BundleInfo {
     /// in the [`Bundle`], with respect to the entity's original archetype (prior to the bundle being added).
     ///
     /// For example, if the original archetype already has `ComponentA` and `T` also has `ComponentA`, the status
-    /// should be `Existing`. If the original archetype does not have `ComponentA`, the status should be `Added`.
+    /// should be `Existing`. If the original archetype does not have `ComponentA`, the status should be `Added`,
+    /// or `Skipped` if `ComponentA` is not part of the target archetype.
+    ///
+    /// `components` must be the [`Components`] of the world that owns this [`BundleInfo`].
     ///
     /// When "inserting" a bundle into an existing entity, [`ArchetypeAfterBundleInsert`](crate::archetype::SpawnBundleStatus)
     /// should be used, which will report `Added` vs `Existing` status based on the current archetype's structure.
@@ -240,6 +243,7 @@ impl BundleInfo {
     #[inline]
     pub(super) unsafe fn write_components<'a, T: DynamicBundle, S: BundleComponentStatus>(
         &self,
+        components: &Components,
         table: &mut Table,
         sparse_sets: &mut SparseSets,
         bundle_component_status: &S,
@@ -262,51 +266,46 @@ impl BundleInfo {
             };
             // SAFETY: bundle_component is a valid index per unsafe bundle impl
             let status = unsafe { bundle_component_status.get_status(bundle_component) };
-            match storage_type {
-                StorageType::Table => {
+            match (storage_type, status, insert_mode) {
+                // The value is not written: either the existing value is kept, or the component is
+                // skipped and the target archetype has no storage for it.
+                (_, ComponentStatus::Existing, InsertMode::Keep)
+                | (_, ComponentStatus::Skipped, _) => {
+                    // SAFETY: component_id is in self.component_ids, which are valid in `components`
+                    let info = unsafe { components.get_info_unchecked(component_id) };
+                    if let Some(drop_fn) = info.drop() {
+                        // SAFETY: component_ptr valid per unsafe bundle impl
+                        unsafe { drop_fn(component_ptr) };
+                    }
+                }
+                (StorageType::Table, ComponentStatus::Added, _) => {
                     let column =
                         // SAFETY: If component_id is in self.component_ids, BundleInfo::new ensures that
                         // the target table contains the component.
                         unsafe { table.get_column_mut(component_id).debug_checked_unwrap() };
-                    match (status, insert_mode) {
-                        // SAFETY:
-                        // - table_row valid per preconditions
-                        // - component_ptr valid per unsafe bundle impl
-                        (ComponentStatus::Added, _) => unsafe {
-                            column.initialize(table_row, component_ptr, change_tick, caller);
-                        },
-                        // SAFETY:
-                        // - table_row valid per preconditions
-                        // - component_ptr valid per unsafe bundle impl
-                        // - component exists per bundle_component_status requirements
-                        (ComponentStatus::Existing, InsertMode::Replace) => unsafe {
-                            column.replace(table_row, component_ptr, change_tick, caller);
-                        },
-                        (ComponentStatus::Existing, InsertMode::Keep) => {
-                            if let Some(drop_fn) = table.get_drop_for(component_id) {
-                                // SAFETY: component_ptr valid per unsafe bundle impl
-                                unsafe { drop_fn(component_ptr) };
-                            }
-                        }
-                    }
+                    // SAFETY:
+                    // - table_row valid per preconditions
+                    // - component_ptr valid per unsafe bundle impl
+                    unsafe { column.initialize(table_row, component_ptr, change_tick, caller) };
                 }
-                StorageType::SparseSet => {
+                (StorageType::Table, ComponentStatus::Existing, InsertMode::Replace) => {
+                    let column =
+                        // SAFETY: If component_id is in self.component_ids, BundleInfo::new ensures that
+                        // the target table contains the component.
+                        unsafe { table.get_column_mut(component_id).debug_checked_unwrap() };
+                    // SAFETY:
+                    // - table_row valid per preconditions
+                    // - component_ptr valid per unsafe bundle impl
+                    // - component exists per bundle_component_status requirements
+                    unsafe { column.replace(table_row, component_ptr, change_tick, caller) };
+                }
+                (StorageType::SparseSet, _, _) => {
                     let sparse_set =
                         // SAFETY: If component_id is in self.component_ids, BundleInfo::new ensures that
                         // a sparse set exists for the component.
                         unsafe { sparse_sets.get_mut(component_id).debug_checked_unwrap() };
-                    match (status, insert_mode) {
-                        // SAFETY: component_ptr valid per unsafe bundle impl
-                        (ComponentStatus::Added, _) | (_, InsertMode::Replace) => unsafe {
-                            sparse_set.insert(entity, component_ptr, change_tick, caller);
-                        },
-                        (ComponentStatus::Existing, InsertMode::Keep) => {
-                            if let Some(drop_fn) = sparse_set.get_drop() {
-                                // SAFETY: component_ptr valid per unsafe bundle impl
-                                unsafe { drop_fn(component_ptr) };
-                            }
-                        }
-                    }
+                    // SAFETY: component_ptr valid per unsafe bundle impl
+                    unsafe { sparse_set.insert(entity, component_ptr, change_tick, caller) };
                 }
             }
             bundle_component += 1;

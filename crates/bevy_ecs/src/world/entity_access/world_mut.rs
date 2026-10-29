@@ -1073,8 +1073,9 @@ impl<'w> EntityWorldMut<'w> {
         let change_tick = self.world.change_tick();
         // SAFETY:
         // - `location.archetype_id` is part of a valid `EntityLocation`.
-        let mut bundle_inserter =
-            unsafe { BundleInserter::new::<T>(self.world, location.archetype_id, change_tick) };
+        let mut bundle_inserter = unsafe {
+            BundleInserter::new::<T>(self.world, location.archetype_id, mode, change_tick)
+        };
         // SAFETY:
         // - `location` matches current entity and thus must currently exist in the source
         //   archetype for this inserter and its location within the archetype.
@@ -1088,7 +1089,6 @@ impl<'w> EntityWorldMut<'w> {
                 self.entity,
                 location,
                 bundle,
-                mode,
                 caller,
                 relationship_hook_mode,
             )
@@ -1161,7 +1161,13 @@ impl<'w> EntityWorldMut<'w> {
         // - bundle initialized above
         // - archetype id taken from existing entity
         let bundle_inserter = unsafe {
-            BundleInserter::new_with_id(self.world, location.archetype_id, bundle_id, change_tick)
+            BundleInserter::new_with_id(
+                self.world,
+                location.archetype_id,
+                bundle_id,
+                mode,
+                change_tick,
+            )
         };
 
         // SAFETY:
@@ -1174,7 +1180,6 @@ impl<'w> EntityWorldMut<'w> {
                 location,
                 Some(component).into_iter(),
                 Some(storage_type).iter().cloned(),
-                mode,
                 caller,
                 relationship_hook_insert_mode,
             )
@@ -1238,7 +1243,13 @@ impl<'w> EntityWorldMut<'w> {
         // - bundle initialized above
         // - archetype id taken from existing entity
         let bundle_inserter = unsafe {
-            BundleInserter::new_with_id(self.world, location.archetype_id, bundle_id, change_tick)
+            BundleInserter::new_with_id(
+                self.world,
+                location.archetype_id,
+                bundle_id,
+                InsertMode::Replace,
+                change_tick,
+            )
         };
 
         // SAFETY:
@@ -1252,7 +1263,6 @@ impl<'w> EntityWorldMut<'w> {
                 location,
                 iter_components,
                 (*storage_types).iter().cloned(),
-                InsertMode::Replace,
                 MaybeLocation::caller(),
                 relationship_hook_insert_mode,
             )
@@ -2447,7 +2457,6 @@ unsafe fn insert_dynamic_bundle<
     location: EntityLocation,
     components: I,
     storage_types: S,
-    mode: InsertMode,
     caller: MaybeLocation,
     relationship_hook_insert_mode: RelationshipHookMode,
 ) -> EntityLocation {
@@ -2490,7 +2499,6 @@ unsafe fn insert_dynamic_bundle<
             entity,
             location,
             bundle,
-            mode,
             caller,
             relationship_hook_insert_mode,
         )

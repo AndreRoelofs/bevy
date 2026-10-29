@@ -2640,6 +2640,7 @@ impl World {
                                 self,
                                 first_location.archetype_id,
                                 bundle_id,
+                                insert_mode,
                                 change_tick,
                             )
                         },
@@ -2652,7 +2653,6 @@ impl World {
                             first_entity,
                             first_location,
                             first_bundle,
-                            insert_mode,
                             caller,
                             RelationshipHookMode::Run,
                         )
@@ -2669,6 +2669,7 @@ impl World {
                                                 self,
                                                 location.archetype_id,
                                                 bundle_id,
+                                                insert_mode,
                                                 change_tick,
                                             )
                                         },
@@ -2682,7 +2683,6 @@ impl World {
                                         entity,
                                         location,
                                         bundle,
-                                        insert_mode,
                                         caller,
                                         RelationshipHookMode::Run,
                                     )
@@ -2788,6 +2788,7 @@ impl World {
                                 self,
                                 first_location.archetype_id,
                                 bundle_id,
+                                insert_mode,
                                 change_tick,
                             )
                         },
@@ -2804,7 +2805,6 @@ impl World {
                             first_entity,
                             first_location,
                             first_bundle,
-                            insert_mode,
                             caller,
                             RelationshipHookMode::Run,
                         )
@@ -2829,6 +2829,7 @@ impl World {
                                     self,
                                     location.archetype_id,
                                     bundle_id,
+                                    insert_mode,
                                     change_tick,
                                 )
                             },
@@ -2846,7 +2847,6 @@ impl World {
                             entity,
                             location,
                             bundle,
-                            insert_mode,
                             caller,
                             RelationshipHookMode::Run,
                         )
@@ -3004,8 +3004,14 @@ impl World {
                     let tick = world.change_tick();
                     // SAFETY:
                     // - `location.archetype_id` is part of a valid `EntityLocation`.
-                    let mut bundle_inserter =
-                        unsafe { BundleInserter::new::<R>(world, location.archetype_id, tick) };
+                    let mut bundle_inserter = unsafe {
+                        BundleInserter::new::<R>(
+                            world,
+                            location.archetype_id,
+                            InsertMode::Replace,
+                            tick,
+                        )
+                    };
                     // SAFETY:
                     // - `location` matches current entity and thus must currently exist in the source
                     //   archetype for this inserter and its location within the archetype.
@@ -3019,7 +3025,6 @@ impl World {
                             self.entity,
                             location,
                             bundle,
-                            InsertMode::Replace,
                             self.caller,
                             RelationshipHookMode::Run,
                         )

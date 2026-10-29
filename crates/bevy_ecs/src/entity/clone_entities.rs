@@ -2,7 +2,9 @@ use crate::{
     archetype::Archetype,
     bundle::{Bundle, BundleRemover, InsertMode},
     change_detection::MaybeLocation,
-    component::{Component, ComponentCloneBehavior, ComponentCloneFn, ComponentId, ComponentInfo},
+    component::{
+        Component, ComponentCloneBehavior, ComponentCloneFn, ComponentId, ComponentInfo, Components,
+    },
     entity::{hash_map::EntityHashMap, Entity, EntityAllocator, EntityMapper},
     query::DebugCheckedUnwrap,
     relationship::RelationshipHookMode,
@@ -618,7 +620,7 @@ impl EntityCloner {
                 state.default_clone_fn = |_, ctx| ctx.move_component();
             }
 
-            filter.clone_components(source_archetype, target_archetype, |component| {
+            let clone_component = |component: ComponentId| {
                 let handler = match state.clone_behavior_overrides.get(&component).or_else(|| {
                     world
                         .components()
@@ -680,7 +682,13 @@ impl EntityCloner {
                         deferred_cloned_component_ids.push(component);
                     }
                 }
-            });
+            };
+            filter.clone_components(
+                world.components(),
+                source_archetype,
+                target_archetype,
+                clone_component,
+            );
         }
 
         world.flush();
@@ -1050,12 +1058,26 @@ impl<'w> EntityClonerBuilder<'w, OptIn> {
     }
 }
 
+/// Returns `true` if [`InsertMode::Keep`] would add `component` to `target_archetype`: it must not exist
+/// there yet, and adding it must not remove a mutually exclusive component.
+fn keep_allows_insert(
+    components: &Components,
+    target_archetype: &Archetype,
+    component: ComponentId,
+) -> bool {
+    !target_archetype.contains(component)
+        && components.get_info(component).is_none_or(|info| {
+            !target_archetype.insert_removes_mutually_exclusive(components, info)
+        })
+}
+
 /// Filters that can selectively clone components depending on its inner configuration are unified with this trait.
 #[doc(hidden)]
 pub trait CloneByFilter: Into<EntityClonerFilter> {
     /// The filter will call `clone_component` for every [`ComponentId`] that passes it.
     fn clone_components<'a>(
         &mut self,
+        components: &Components,
         source_archetype: &Archetype,
         target_archetype: LazyCell<&'a Archetype, impl FnOnce() -> &'a Archetype>,
         clone_component: impl FnMut(ComponentId),
@@ -1080,16 +1102,27 @@ impl CloneByFilter for EntityClonerFilter {
     #[inline]
     fn clone_components<'a>(
         &mut self,
+        components: &Components,
         source_archetype: &Archetype,
         target_archetype: LazyCell<&'a Archetype, impl FnOnce() -> &'a Archetype>,
         clone_component: impl FnMut(ComponentId),
     ) {
         match self {
             Self::OptOut(filter) => {
-                filter.clone_components(source_archetype, target_archetype, clone_component);
+                filter.clone_components(
+                    components,
+                    source_archetype,
+                    target_archetype,
+                    clone_component,
+                );
             }
             Self::OptIn(filter) => {
-                filter.clone_components(source_archetype, target_archetype, clone_component);
+                filter.clone_components(
+                    components,
+                    source_archetype,
+                    target_archetype,
+                    clone_component,
+                );
             }
         }
     }
@@ -1127,6 +1160,7 @@ impl CloneByFilter for OptOut {
     #[inline]
     fn clone_components<'a>(
         &mut self,
+        components: &Components,
         source_archetype: &Archetype,
         target_archetype: LazyCell<&'a Archetype, impl FnOnce() -> &'a Archetype>,
         mut clone_component: impl FnMut(ComponentId),
@@ -1141,7 +1175,9 @@ impl CloneByFilter for OptOut {
             }
             InsertMode::Keep => {
                 for component in source_archetype.iter_components() {
-                    if !target_archetype.contains(component) && !self.deny.contains(&component) {
+                    if !self.deny.contains(&component)
+                        && keep_allows_insert(components, *target_archetype, component)
+                    {
                         clone_component(component);
                     }
                 }
@@ -1201,6 +1237,7 @@ impl CloneByFilter for OptIn {
     #[inline]
     fn clone_components<'a>(
         &mut self,
+        components: &Components,
         source_archetype: &Archetype,
         target_archetype: LazyCell<&'a Archetype, impl FnOnce() -> &'a Archetype>,
         mut clone_component: impl FnMut(ComponentId),
@@ -1225,7 +1262,7 @@ impl CloneByFilter for OptIn {
 
             let do_clone = source_archetype.contains(component)
                 && (explicit.insert_mode == InsertMode::Replace
-                    || !target_archetype.contains(component));
+                    || keep_allows_insert(components, *target_archetype, component));
             if do_clone {
                 clone_component(component);
                 uncloned_components -= 1;

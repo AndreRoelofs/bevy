@@ -53,6 +53,7 @@ impl<'w> BundleSpawner<'w> {
                 &world.components,
                 &world.observers,
                 ArchetypeId::EMPTY,
+                InsertMode::Replace,
             )
         };
 
@@ -134,6 +135,7 @@ impl<'w> BundleSpawner<'w> {
             // - table_row was just allocated, bundle matches
             unsafe {
                 bundle_info.write_components(
+                    self.world.components(),
                     table,
                     sparse_sets,
                     &SpawnBundleStatus,

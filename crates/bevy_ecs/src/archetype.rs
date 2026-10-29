@@ -20,8 +20,10 @@
 //! [`World::archetypes`]: crate::world::World::archetypes
 
 use crate::{
-    bundle::BundleId,
-    component::{ComponentId, Components, RequiredComponentConstructor, StorageType},
+    bundle::{BundleId, InsertMode},
+    component::{
+        ComponentId, ComponentInfo, Components, RequiredComponentConstructor, StorageType,
+    },
     entity::{Entity, EntityLocation},
     event::{Event, EventKey},
     observer::Observers,
@@ -121,11 +123,14 @@ impl ArchetypeId {
 }
 
 /// Used in [`ArchetypeAfterBundleInsert`] to track whether components in the bundle are newly
-/// added or already existed in the entity's archetype.
+/// added, already existed in the entity's archetype, or are skipped.
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) enum ComponentStatus {
     Added,
     Existing,
+    /// Adding the component has been skipped because another mutually exclusive variant
+    /// is present.
+    Skipped,
 }
 
 /// Used in [`Edges`] to cache the result of inserting a bundle into the source archetype.
@@ -256,20 +261,36 @@ impl BundleComponentStatus for SpawnBundleStatus {
 /// [`World`]: crate::world::World
 #[derive(Default)]
 pub struct Edges {
-    insert_bundle: SparseArray<BundleId, ArchetypeAfterBundleInsert>,
+    insert_bundle_replace: SparseArray<BundleId, ArchetypeAfterBundleInsert>,
+    insert_bundle_keep: SparseArray<BundleId, ArchetypeAfterBundleInsert>,
     remove_bundle: SparseArray<BundleId, Option<ArchetypeId>>,
     take_bundle: SparseArray<BundleId, Option<ArchetypeId>>,
 }
 
 impl Edges {
+    #[inline]
+    fn insert_bundle(
+        &self,
+        insert_mode: InsertMode,
+    ) -> &SparseArray<BundleId, ArchetypeAfterBundleInsert> {
+        match insert_mode {
+            InsertMode::Replace => &self.insert_bundle_replace,
+            InsertMode::Keep => &self.insert_bundle_keep,
+        }
+    }
+
     /// Checks the cache for the target archetype when inserting a bundle into the
     /// source archetype.
     ///
     /// If this returns `None`, it means there has not been a transition from
     /// the source archetype via the provided bundle.
     #[inline]
-    pub fn get_archetype_after_bundle_insert(&self, bundle_id: BundleId) -> Option<ArchetypeId> {
-        self.get_archetype_after_bundle_insert_internal(bundle_id)
+    pub fn get_archetype_after_bundle_insert(
+        &self,
+        bundle_id: BundleId,
+        insert_mode: InsertMode,
+    ) -> Option<ArchetypeId> {
+        self.get_archetype_after_bundle_insert_internal(bundle_id, insert_mode)
             .map(|bundle| bundle.archetype_id)
     }
 
@@ -279,8 +300,9 @@ impl Edges {
     pub(crate) fn get_archetype_after_bundle_insert_internal(
         &self,
         bundle_id: BundleId,
+        insert_mode: InsertMode,
     ) -> Option<&ArchetypeAfterBundleInsert> {
-        self.insert_bundle.get(bundle_id)
+        self.insert_bundle(insert_mode).get(bundle_id)
     }
 
     /// Caches the target archetype when inserting a bundle into the source archetype.
@@ -288,6 +310,7 @@ impl Edges {
     pub(crate) fn cache_archetype_after_bundle_insert(
         &mut self,
         bundle_id: BundleId,
+        insert_mode: InsertMode,
         archetype_id: ArchetypeId,
         bundle_status: impl Into<Box<[ComponentStatus]>>,
         required_components: impl Into<Box<[RequiredComponentConstructor]>>,
@@ -307,7 +330,11 @@ impl Edges {
                 .chain(removed_sparse)
                 .chain(removed_table),
         );
-        self.insert_bundle.insert(
+        let insert_bundle = match insert_mode {
+            InsertMode::Replace => &mut self.insert_bundle_replace,
+            InsertMode::Keep => &mut self.insert_bundle_keep,
+        };
+        insert_bundle.insert(
             bundle_id,
             ArchetypeAfterBundleInsert {
                 archetype_id,
@@ -714,6 +741,25 @@ impl Archetype {
     #[inline]
     pub fn contains(&self, component_id: ComponentId) -> bool {
         self.components.contains(component_id)
+    }
+
+    pub(crate) fn insert_removes_mutually_exclusive(
+        &self,
+        components: &Components,
+        info: &ComponentInfo,
+    ) -> bool {
+        let contains_mutually_exclusive = |info: &ComponentInfo| {
+            info.mutually_exclusive()
+                .iter()
+                .any(|&id| self.contains(id))
+        };
+        contains_mutually_exclusive(info)
+            || info.required_components().all.keys().any(|&required| {
+                !self.contains(required)
+                    && components
+                        .get_info(required)
+                        .is_some_and(contains_mutually_exclusive)
+            })
     }
 
     /// Gets the type of storage where a component in the archetype can be found.
